@@ -4,14 +4,21 @@ Công cụ cứu dữ liệu khi một tab (instance) LDPlayer 4 bị lỗi, kh�
 
 ## Cách dùng
 
-1. Tải **LDFix.exe** ở mục **Releases** (hoặc tab **Actions** → bản build mới nhất → Artifacts).
-2. Mở LDFix.exe (Windows sẽ hỏi quyền Admin → chọn **Yes**).
-3. Chọn tab bị lỗi trong danh sách → bấm **GỠ LỖI TAB ĐÃ CHỌN**.
-4. Đợi tool chạy xong → mở tab mới tên `Fix_tab<số>`, dữ liệu cũ đã nằm trong đó.
+1. Tải **[LDFix.zip](https://github.com/tnhhdongquanvlad-creator/LDFix/releases/latest/download/LDFix.zip)**, giải nén ra 1 thư mục (giữ `LDFix.exe`, `7z.exe`, `7z.dll` cùng chỗ).
+2. Mở LDFix.exe (Windows hỏi quyền Admin → **Yes**).
+3. Chọn tab bị lỗi → bấm **CỨU GAME TỪ TAB LỖI** → tick game cần cứu.
+4. Tool tạo tab sạch `Game_tab<số>`, tự bật Root, cài game và chép dữ liệu game vào, rồi mở game.
 
-> Không có exe? Tải cả thư mục về, nhấp đúp **LDFix.bat**.
+## Cứu game làm gì (v2)
 
-## Tool làm gì
+Tab đứng ở 94% = phần hệ thống Android trong `data.vmdk` bị hỏng. v2 không chép nguyên ổ đĩa nữa mà:
+1. Đọc **bên trong** `data.vmdk` của tab lỗi bằng 7-Zip (chỉ đọc).
+2. Lấy riêng file cài game (`/data/app/<game>`) và dữ liệu game (`/data/data/<game>`), cùng `Android/data`, `Android/obb` trên sdcard.
+3. Tạo tab sạch, bật Root, cài game, chép dữ liệu, chỉnh lại quyền sở hữu file.
+
+Cần trống ổ đĩa đủ để bóc ảnh đĩa (thường vài GB). Thư mục tạm `LDFix_Work` được xoá sau khi xong.
+
+## Chép nguyên tab (cách cũ)
 
 1. Tắt toàn bộ LDPlayer.
 2. Sao lưu tab lỗi vào `<thư mục LDPlayer>\LDFix_Backup\`.
@@ -30,4 +37,4 @@ Tab cũ **không bị xoá**.
 ## Build exe
 
 Mỗi lần push lên `main`, GitHub Actions tự build `LDFix.exe` bằng [ps2exe](https://github.com/MScholtes/PS2EXE).
-Push tag `v1.0.0` để tạo bản Release có file exe đính kèm.
+Mỗi bản build được đăng ở mục **Releases**.
