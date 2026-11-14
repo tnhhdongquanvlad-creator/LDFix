@@ -9,14 +9,16 @@ Công cụ cứu dữ liệu khi một tab (instance) LDPlayer 4 bị lỗi, kh�
 3. Chọn tab bị lỗi → bấm **CỨU GAME TỪ TAB LỖI** → tick game cần cứu.
 4. Tool tạo tab sạch `Game_tab<số>`, tự bật Root, cài game và chép dữ liệu game vào, rồi mở game.
 
-## Cứu game làm gì (v2)
+## Cứu game làm gì (v3)
 
-Tab đứng ở 94% = phần hệ thống Android trong `data.vmdk` bị hỏng. v2 không chép nguyên ổ đĩa nữa mà:
-1. Đọc **bên trong** `data.vmdk` của tab lỗi bằng 7-Zip (chỉ đọc).
-2. Lấy riêng file cài game (`/data/app/<game>`) và dữ liệu game (`/data/data/<game>`), cùng `Android/data`, `Android/obb` trên sdcard.
-3. Tạo tab sạch, bật Root, cài game, chép dữ liệu, chỉnh lại quyền sở hữu file.
+Tab đứng ở 94% = Android vẫn chạy nhưng không khởi động xong vì phần hệ thống trong `data.vmdk` bị hỏng.
 
-Cần trống ổ đĩa đủ để bóc ảnh đĩa (thường vài GB). Thư mục tạm `LDFix_Work` được xoá sau khi xong.
+**Cách 1 (ưu tiên, không cần ổ trống lớn):** tool tự bật Root cho tab lỗi, mở nó lên, lấy file cài game (`/data/app/<game>`) và dữ liệu game (`/data/data/<game>`, `Android/data`, `Android/obb`) qua ADB.
+
+**Cách 2 (dự phòng):** nếu ADB không vào được, đọc bên trong `data.vmdk` bằng 7-Zip. Cách này phải bung cả ổ ảo (có thể tới ~64 GB), tool tự dùng ổ còn trống nhiều nhất (C:, D:, ...).
+
+Sau đó tool tạo tab sạch `Game_tab<số>`, bật Root, cài game, chép dữ liệu game vào, chỉnh quyền file và mở game.
+Thư mục tạm `LDFix_Work` được xoá khi xong.
 
 ## Chép nguyên tab (cách cũ)
 
