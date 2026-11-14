@@ -1,4 +1,4 @@
-﻿# LDFix v3.2 - Gỡ lỗi / cứu game từ tab LDPlayer 4
+﻿# LDFix v3.3 - Gỡ lỗi / cứu game từ tab LDPlayer 4
 # Cách làm: tạo tab mới, chép data.vmdk + sdcard.vmdk từ tab lỗi sang tab mới.
 # Tab cũ KHÔNG bị xoá và được sao lưu trước khi làm.
 
@@ -180,6 +180,14 @@ function Get-7z {
 
 function Quote-Arg([string]$a) { if ($a -match '[\s"]' -or $a -eq '') { '"' + ($a -replace '"', '\"') + '"' } else { $a } }
 
+# Đọc file kể cả khi tiến trình khác (vd adb server) còn giữ nó
+function Read-Shared([string]$path) {
+    try {
+        $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try { $sr = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8); return $sr.ReadToEnd() } finally { $fs.Dispose() }
+    } catch { return '' }
+}
+
 # Chạy exe ẩn, không treo giao diện, trả về mã thoát + output
 function Run-Exe([string]$exe, [string[]]$argList, [int]$timeoutSec = 3600) {
     $out = [IO.Path]::GetTempFileName(); $err = [IO.Path]::GetTempFileName()
@@ -194,10 +202,10 @@ function Run-Exe([string]$exe, [string[]]$argList, [int]$timeoutSec = 3600) {
     }
     $r = [pscustomobject]@{
         Code = $p.ExitCode
-        Out  = [IO.File]::ReadAllText($out, [Text.Encoding]::UTF8)
-        Err  = [IO.File]::ReadAllText($err, [Text.Encoding]::UTF8)
+        Out  = Read-Shared $out
+        Err  = Read-Shared $err
     }
-    Remove-Item $out, $err -ErrorAction SilentlyContinue
+    Remove-Item $out, $err -Force -ErrorAction SilentlyContinue
     return $r
 }
 
@@ -235,7 +243,8 @@ function Run-RootScript([string[]]$lines, [string]$work, [int]$t = 1800) {
 function Connect-Adb($idx, [bool]$needBoot, [int]$minutes) {
     if (-not $script:AdbRestarted) {
         Get-Process | Where-Object { $_.Name -eq 'adb' } | ForEach-Object { try { $_.Kill() } catch {} }
-        [void](Run-Exe $script:Adb @('start-server') 60)
+        # Khởi động adb server KHÔNG chuyển hướng output, để server không giữ file tạm
+        try { Start-Process -FilePath $script:Adb -ArgumentList 'start-server' -WindowStyle Hidden -Wait } catch {}
         $script:AdbRestarted = $true
     }
     $emu = "emulator-{0}" -f (5554 + 2 * $idx)
@@ -743,7 +752,7 @@ function Rescue-Game($src) {
 
 # ================= Giao diện =================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "LDFix v3.2 — Gỡ lỗi tab LDPlayer 4"
+$form.Text = "LDFix v3.3 — Gỡ lỗi tab LDPlayer 4"
 $form.Size = New-Object System.Drawing.Size(680, 610)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
