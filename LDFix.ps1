@@ -1,4 +1,4 @@
-﻿# LDFix v3.1 - Gỡ lỗi / cứu game từ tab LDPlayer 4
+﻿# LDFix v3.2 - Gỡ lỗi / cứu game từ tab LDPlayer 4
 # Cách làm: tạo tab mới, chép data.vmdk + sdcard.vmdk từ tab lỗi sang tab mới.
 # Tab cũ KHÔNG bị xoá và được sao lưu trước khi làm.
 
@@ -377,79 +377,286 @@ function Get-7zEntries($img, [string]$type = '') {
     return $list
 }
 
-function Open-Disk($vmdk, $work) {
-    $img = $vmdk
-    for ($lvl = 0; $lvl -lt 3; $lvl++) {
-        $entries = Get-7zEntries $img
-        if ($entries.Count -le 20 -and $lvl -gt 0) {
-            $e2 = Get-7zEntries $img 'Ext'
-            if ($e2.Count -gt $entries.Count) { $entries = $e2 }
+# ---------- Bộ đọc ext4 (chỉ đọc) — thay cho 7-Zip khi 7-Zip không mở được phân vùng Android ----------
+$script:ExtCs = @'
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+
+public class ExtEntry { public string Name; public uint Inode; public byte Type; }
+
+public class ExtReader : IDisposable {
+    FileStream fs;
+    public int BlockSize;
+    uint inodesPerGroup; int inodeSize; int descSize; long firstDataBlock;
+    public string Info;
+    public int Errors;
+    Dictionary<uint, long> gd = new Dictionary<uint, long>();
+
+    public ExtReader(string path) {
+        fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 20);
+        byte[] sb = ReadAt(1024, 1024);
+        ushort magic = BitConverter.ToUInt16(sb, 56);
+        if (magic != 0xEF53) {
+            throw new Exception("khong phai ext4 (magic=" + magic.ToString("X4") + ", 16 byte dau=" + BitConverter.ToString(ReadAt(0, 16)) + ", byte 1024=" + BitConverter.ToString(ReadAt(1024, 16)) + ")");
         }
-        if ($entries.Count -gt 20) { return [pscustomobject]@{ Img = $img; Entries = $entries } }
-        if ($entries.Count -eq 0) {
-            $msg = (($script:Last7z.Err + "`n" + $script:Last7z.Out) -split "`r?`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 4) -join ' | '
-            throw "7-Zip không đọc được $img — chi tiết: $msg"
-        }
-        Log ("  Trong {0} có: {1}" -f (Split-Path $img -Leaf), (($entries | ForEach-Object { "{0} ({1:N1} GB)" -f $_.Path, ($_.Size / 1GB) }) -join ', '))
-        $inner = $entries | Where-Object { -not $_.IsDir } | Sort-Object Size -Descending | Select-Object -First 1
-        $free = Get-FreeBytes $work
-        if ($inner.Size -gt ($free - 2GB)) {
-            throw ("Cách 2 cần bung ổ ảo {0:N1} GB nhưng ổ trống nhất chỉ còn {1:N1} GB" -f ($inner.Size / 1GB), ($free / 1GB))
-        }
-        Log ("Đang bung ổ ảo '{0}' ({1:N1} GB), có thể mất 10-30 phút..." -f $inner.Path, ($inner.Size / 1GB))
-        $dir = Join-Path $work "lvl$lvl"
-        $t0 = Get-Date
-        $r = Run-Exe $script:SevenZ @('x', $img, "-o$dir", '-y', $inner.Path) 7200
-        $img = Join-Path $dir $inner.Path
-        $got = if (Test-Path $img) { (Get-Item $img).Length } else { 0 }
-        Log ("  7-Zip xong sau {0:N0} giây, mã {1}, file thật {2:N1} GB" -f ((Get-Date) - $t0).TotalSeconds, $r.Code, ($got / 1GB))
-        if ($r.Code -ne 0) {
-            $msg = (($r.Err + "`n" + $r.Out) -split "`r?`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 4) -join ' | '
-            Log "  Lỗi 7-Zip: $msg"
-        }
-        if ($got -eq 0) { throw "Không bung được $($inner.Path)" }
+        BlockSize = 1024 << (int)BitConverter.ToUInt32(sb, 24);
+        firstDataBlock = BitConverter.ToUInt32(sb, 20);
+        inodesPerGroup = BitConverter.ToUInt32(sb, 40);
+        inodeSize = BitConverter.ToUInt16(sb, 88); if (inodeSize == 0) inodeSize = 128;
+        uint incompat = BitConverter.ToUInt32(sb, 96);
+        descSize = ((incompat & 0x80) != 0) ? BitConverter.ToUInt16(sb, 254) : 32;
+        if (descSize < 32) descSize = 32;
+        Info = "ext4 block=" + BlockSize + " inode=" + inodeSize + " incompat=0x" + incompat.ToString("X") +
+               " ro_compat=0x" + BitConverter.ToUInt32(sb, 100).ToString("X");
     }
-    throw "Không tìm thấy hệ thống file trong $vmdk"
+
+    byte[] ReadAt(long off, int len) {
+        byte[] b = new byte[len]; fs.Position = off; int r = 0;
+        while (r < len) { int n = fs.Read(b, r, len - r); if (n <= 0) break; r += n; }
+        return b;
+    }
+
+    long InodeTable(uint g) {
+        long v; if (gd.TryGetValue(g, out v)) return v;
+        byte[] d = ReadAt((firstDataBlock + 1) * BlockSize + (long)g * descSize, descSize);
+        long t = BitConverter.ToUInt32(d, 8);
+        if (descSize >= 64) t |= ((long)BitConverter.ToUInt32(d, 0x28)) << 32;
+        gd[g] = t; return t;
+    }
+
+    public byte[] ReadInode(uint ino) {
+        uint g = (ino - 1) / inodesPerGroup, i = (ino - 1) % inodesPerGroup;
+        return ReadAt(InodeTable(g) * BlockSize + (long)i * inodeSize, inodeSize);
+    }
+
+    public static long Size(byte[] n) { return (long)BitConverter.ToUInt32(n, 4) | ((long)BitConverter.ToUInt32(n, 108) << 32); }
+    public static int Mode(byte[] n) { return BitConverter.ToUInt16(n, 0); }
+    static bool Inline(byte[] n) { return (BitConverter.ToUInt32(n, 32) & 0x10000000) != 0; }
+
+    // {block logic, block vat ly (-1 = toan so 0), so block}
+    public List<long[]> Extents(byte[] n) {
+        List<long[]> res = new List<long[]>();
+        byte[] ib = new byte[60]; Array.Copy(n, 40, ib, 0, 60);
+        if ((BitConverter.ToUInt32(n, 32) & 0x80000) != 0) Walk(ib, res); else BlockMap(ib, res);
+        return res;
+    }
+
+    void Walk(byte[] node, List<long[]> res) {
+        if (BitConverter.ToUInt16(node, 0) != 0xF30A) throw new Exception("extent hong");
+        int cnt = BitConverter.ToUInt16(node, 2), depth = BitConverter.ToUInt16(node, 6);
+        for (int i = 0; i < cnt; i++) {
+            int o = 12 + i * 12;
+            if (depth == 0) {
+                long lb = BitConverter.ToUInt32(node, o);
+                int len = BitConverter.ToUInt16(node, o + 4);
+                long st = ((long)BitConverter.ToUInt16(node, o + 6) << 32) | BitConverter.ToUInt32(node, o + 8);
+                if (len > 32768) res.Add(new long[] { lb, -1, len - 32768 }); else res.Add(new long[] { lb, st, len });
+            } else {
+                long leaf = BitConverter.ToUInt32(node, o + 4) | ((long)BitConverter.ToUInt16(node, o + 8) << 32);
+                Walk(ReadAt(leaf * BlockSize, BlockSize), res);
+            }
+        }
+    }
+
+    void BlockMap(byte[] ib, List<long[]> res) {
+        for (int i = 0; i < 12; i++) { uint b = BitConverter.ToUInt32(ib, i * 4); if (b != 0) res.Add(new long[] { i, b, 1 }); }
+        long per = BlockSize / 4, l = 12;
+        uint a = BitConverter.ToUInt32(ib, 48); if (a != 0) Indirect(a, 1, ref l, res); else l += per;
+        uint b2 = BitConverter.ToUInt32(ib, 52); if (b2 != 0) Indirect(b2, 2, ref l, res); else l += per * per;
+        uint c = BitConverter.ToUInt32(ib, 56); if (c != 0) Indirect(c, 3, ref l, res);
+    }
+
+    void Indirect(uint blk, int level, ref long l, List<long[]> res) {
+        byte[] d = ReadAt((long)blk * BlockSize, BlockSize); int per = BlockSize / 4;
+        long span = 1; for (int k = 1; k < level; k++) span *= per;
+        for (int i = 0; i < per; i++) {
+            uint b = BitConverter.ToUInt32(d, i * 4);
+            if (level == 1) { if (b != 0) res.Add(new long[] { l, b, 1 }); l++; }
+            else if (b != 0) Indirect(b, level - 1, ref l, res); else l += span;
+        }
+    }
+
+    byte[] ReadAll(byte[] n) {
+        long size = Size(n);
+        if (size > 256L * 1024 * 1024) throw new Exception("thu muc qua lon");
+        byte[] buf = new byte[size];
+        if (Inline(n)) { Array.Copy(n, 40, buf, 0, (int)Math.Min(size, 60)); return buf; }
+        foreach (long[] e in Extents(n)) {
+            if (e[1] < 0) continue;
+            long off = e[0] * BlockSize; if (off >= size) continue;
+            int len = (int)Math.Min(e[2] * BlockSize, size - off);
+            Array.Copy(ReadAt(e[1] * BlockSize, len), 0, buf, off, len);
+        }
+        return buf;
+    }
+
+    public List<ExtEntry> ListDir(uint ino) {
+        byte[] d = ReadAll(ReadInode(ino));
+        List<ExtEntry> list = new List<ExtEntry>(); int p = 0;
+        while (p + 8 <= d.Length) {
+            uint inode = BitConverter.ToUInt32(d, p); int rec = BitConverter.ToUInt16(d, p + 4);
+            int nl = d[p + 6];
+            if (rec < 8) break;
+            if (inode != 0 && nl > 0 && p + 8 + nl <= d.Length) {
+                string name = Encoding.UTF8.GetString(d, p + 8, nl);
+                if (name != "." && name != "..") { ExtEntry e = new ExtEntry(); e.Name = name; e.Inode = inode; e.Type = d[p + 7]; list.Add(e); }
+            }
+            p += rec;
+        }
+        return list;
+    }
+
+    public uint Lookup(string path) {
+        uint cur = 2;
+        foreach (string part in path.Split(new char[] { '/' }, StringSplitOptions.RemoveEmptyEntries)) {
+            uint next = 0;
+            foreach (ExtEntry e in ListDir(cur)) if (e.Name == part) { next = e.Inode; break; }
+            if (next == 0) return 0;
+            cur = next;
+        }
+        return cur;
+    }
+
+    public long FileSize(uint ino) { return Size(ReadInode(ino)); }
+    public bool IsDir(uint ino) { return (Mode(ReadInode(ino)) & 0xF000) == 0x4000; }
+
+    public void ExtractFile(uint ino, string dest) {
+        byte[] n = ReadInode(ino); long size = Size(n);
+        using (FileStream o = new FileStream(dest, FileMode.Create, FileAccess.Write)) {
+            if (Inline(n)) { o.Write(n, 40, (int)Math.Min(size, 60)); return; }
+            o.SetLength(size);
+            byte[] buf = new byte[1 << 20];
+            foreach (long[] e in Extents(n)) {
+                if (e[1] < 0) continue;
+                long off = e[0] * BlockSize; if (off >= size) continue;
+                long len = Math.Min(e[2] * BlockSize, size - off);
+                fs.Position = e[1] * BlockSize; o.Position = off;
+                while (len > 0) { int r = fs.Read(buf, 0, (int)Math.Min(buf.Length, len)); if (r <= 0) break; o.Write(buf, 0, r); len -= r; }
+            }
+        }
+    }
+
+    static string Safe(string name) {
+        foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+        return name;
+    }
+
+    public int ExtractTree(uint ino, string dest, string[] skipTop) {
+        Directory.CreateDirectory(dest); int count = 0;
+        foreach (ExtEntry e in ListDir(ino)) {
+            if (skipTop != null && Array.IndexOf(skipTop, e.Name) >= 0) continue;
+            try {
+                byte[] n = ReadInode(e.Inode); int fmt = Mode(n) & 0xF000;
+                string p = Path.Combine(dest, Safe(e.Name));
+                if (fmt == 0x4000) count += ExtractTree(e.Inode, p, null);
+                else if (fmt == 0x8000) { ExtractFile(e.Inode, p); count++; }
+            } catch { Errors++; }
+        }
+        return count;
+    }
+
+    public void Dispose() { fs.Dispose(); }
+}
+'@
+
+function Load-ExtReader { if (-not ('ExtReader' -as [type])) { Add-Type -TypeDefinition $script:ExtCs -Language CSharp } }
+
+function Err-Text($ex) { if ($ex.InnerException) { $ex.InnerException.Message } else { $ex.Message } }
+
+# Bung từng phân vùng trong vmdk bằng 7-Zip rồi mở bằng bộ đọc ext4.
+# $want: đường dẫn phải có trong phân vùng (vd '/app'); rỗng = nhận phân vùng ext4 đầu tiên lớn nhất.
+function Open-ExtFromVmdk($vmdk, $work, $tag, [string[]]$want) {
+    Load-ExtReader
+    $parts = @(Get-7zEntries $vmdk | Where-Object { -not $_.IsDir } | Sort-Object Size -Descending)
+    if ($parts.Count -eq 0) { throw "7-Zip không đọc được $vmdk" }
+    Log ("  Trong {0} có: {1}" -f (Split-Path $vmdk -Leaf), (($parts | ForEach-Object { "{0} ({1:N1} GB)" -f $_.Path, ($_.Size / 1GB) }) -join ', '))
+    foreach ($p in $parts) {
+        $free = Get-FreeBytes $work
+        if ($p.Size -gt ($free - 2GB)) { Log ("  Bỏ qua {0}: cần {1:N1} GB, ổ còn {2:N1} GB" -f $p.Path, ($p.Size / 1GB), ($free / 1GB)); continue }
+        $dir = Join-Path $work $tag
+        Log ("  Đang bung {0} ({1:N1} GB)..." -f $p.Path, ($p.Size / 1GB))
+        $r7 = Run-Exe $script:SevenZ @('x', $vmdk, "-o$dir", '-y', $p.Path) 7200
+        $img = Join-Path $dir $p.Path
+        if (-not (Test-Path $img)) { Log "  Không bung được $($p.Path) (mã $($r7.Code))"; continue }
+        try {
+            $rd = New-Object ExtReader($img)
+            Log "  $($p.Path): $($rd.Info)"
+            $ok = (-not $want)
+            foreach ($w in $want) { if ($rd.Lookup($w) -ne 0) { $ok = $true; break } }
+            if ($ok) { $script:Readers += $rd; return $rd }
+            Log "  $($p.Path) không chứa $($want -join ' / ')"
+            $rd.Dispose()
+        } catch { Log "  $($p.Path): $(Err-Text $_.Exception)" }
+        Remove-Item $img -Force -ErrorAction SilentlyContinue
+    }
+    return $null
 }
 
 function Extract-Via7z($src, $work) {
-    Log "CÁCH 2: đọc trực tiếp ổ đĩa ảo của tab [$src] bằng 7-Zip..."
+    Log "CÁCH 2: đọc trực tiếp ổ đĩa ảo của tab [$src]..."
     $script:SevenZ = Get-7z
     if (-not $script:SevenZ) { Log "  Không thấy 7z.exe cạnh LDFix.exe."; return $null }
     $SrcDir = Join-Path (Vms) "leidian$src"
-    $disk = Open-Disk (Join-Path $SrcDir "data.vmdk") $work
+    $rd = Open-ExtFromVmdk (Join-Path $SrcDir "data.vmdk") $work 'data' @('/app')
+    if (-not $rd) { Log "  Không tìm thấy phân vùng dữ liệu Android."; return $null }
+
     $apps = @()
-    foreach ($e in $disk.Entries) {
-        if ($e.Path -match '^(?<pre>(.*\\)?)app\\(?<dir>(?<pkg>[A-Za-z0-9_.]+)-[^\\]+)\\base\.apk$') {
-            $apps += [pscustomobject]@{ Pkg = $Matches.pkg; Pre = $Matches.pre; Dir = $Matches.dir; Size = $e.Size }
+    foreach ($e in $rd.ListDir($rd.Lookup('/app'))) {
+        if ($e.Name -match '^(?<pkg>[A-Za-z0-9_.]+)-[^/]+$') {
+            $b = $rd.Lookup("/app/$($e.Name)/base.apk")
+            $size = if ($b -ne 0) { $rd.FileSize($b) } else { 0 }
+            $apps += [pscustomobject]@{ Pkg = $Matches.pkg; Dir = $e.Name; Size = [int64]$size }
         }
     }
-    if ($apps.Count -eq 0) { Log "  Không tìm thấy game nào trong ổ đĩa."; return $null }
+    if ($apps.Count -eq 0) { Log "  Không tìm thấy game nào trong /app."; return $null }
     $apps = @($apps | Sort-Object Size -Descending)
+    Log "  Tìm thấy $($apps.Count) app/game."
     $pick = Pick-Apps $apps
     if (-not $pick -or $pick.Apps.Count -eq 0) { return [pscustomobject]@{ Cancel = $true } }
 
     $out = Join-Path $work "out"
     foreach ($a in $pick.Apps) {
-        Log "  Đang lấy file của $($a.Pkg)..."
-        $d = "$($a.Pre)data\$($a.Pkg)"
-        [void](Run-Exe $script:SevenZ @('x', $disk.Img, "-o$out", '-y', "$($a.Pre)app\$($a.Dir)", $d,
-                                        "-x!$d\lib", "-x!$d\cache", "-x!$d\code_cache"))
-        $a | Add-Member -Force AppDir  (Join-Path $out "$($a.Pre)app\$($a.Dir)")
-        $a | Add-Member -Force DataDir (Join-Path $out $d)
+        Log "  Đang lấy file cài của $($a.Pkg)..."
+        $appDir = Join-Path $out "app\$($a.Dir)"
+        New-Item -ItemType Directory -Force $appDir | Out-Null
+        foreach ($f in $rd.ListDir($rd.Lookup("/app/$($a.Dir)"))) {
+            if ($f.Name -like '*.apk') { $rd.ExtractFile($f.Inode, (Join-Path $appDir $f.Name)); [System.Windows.Forms.Application]::DoEvents() }
+        }
+        $dataDir = Join-Path $out "data\$($a.Pkg)"
+        $di = $rd.Lookup("/data/$($a.Pkg)")
+        if ($di -ne 0) {
+            Log "  Đang lấy dữ liệu game..."
+            $n = $rd.ExtractTree($di, $dataDir, [string[]]@('lib', 'cache', 'code_cache'))
+            Log "  Lấy được $n file dữ liệu (lỗi: $($rd.Errors))."
+        } else { Log "  Không có /data/$($a.Pkg) trong tab cũ." }
+        $a | Add-Member -Force AppDir $appDir
+        $a | Add-Member -Force DataDir $dataDir
     }
+
     if ($pick.WithSd -and (Test-Path (Join-Path $SrcDir "sdcard.vmdk"))) {
         try {
-            $sdDisk = Open-Disk (Join-Path $SrcDir "sdcard.vmdk") (New-Item -ItemType Directory -Force (Join-Path $work "sdimg")).FullName
-            $sdOut = Join-Path $work "sd"
-            foreach ($a in $pick.Apps) {
-                foreach ($h in ($sdDisk.Entries | Where-Object { $_.IsDir -and $_.Path -match ('(^|\\)Android\\(data|obb)\\' + [regex]::Escape($a.Pkg) + '$') })) {
-                    [void](Run-Exe $script:SevenZ @('x', $sdDisk.Img, "-o$sdOut", '-y', $h.Path))
-                    $kind = $h.Path -replace '.*Android\\(data|obb)\\.*', '$1'
-                    $a | Add-Member -Force ("Sd_" + $kind) (Join-Path $sdOut $h.Path)
+            $bases = @('/Android', '/media/0/Android', '/0/Android', '/data/media/0/Android', '/emulated/0/Android')
+            $sd = Open-ExtFromVmdk (Join-Path $SrcDir "sdcard.vmdk") $work 'sd' $bases
+            $base = $null
+            if ($sd) { foreach ($b in $bases) { if ($sd.Lookup($b) -ne 0) { $base = $b; break } } }
+            # Android/data trong phân vùng data (khi sdcard nằm chung ổ data)
+            if (-not $base) { foreach ($b in '/media/0/Android') { if ($rd.Lookup($b) -ne 0) { $sd = $rd; $base = $b; break } } }
+            if ($base) {
+                foreach ($a in $pick.Apps) {
+                    foreach ($kind in 'data', 'obb') {
+                        $ino = $sd.Lookup("$base/$kind/$($a.Pkg)")
+                        if ($ino -ne 0) {
+                            Log "  Đang lấy Android/$kind/$($a.Pkg) (có thể lâu)..."
+                            $dst = Join-Path $work "sdout\$kind\$($a.Pkg)"
+                            [void]$sd.ExtractTree($ino, $dst, $null)
+                            $a | Add-Member -Force ("Sd_" + $kind) $dst
+                        }
+                    }
                 }
-            }
-        } catch { Log "  Bỏ qua sdcard: $($_.Exception.Message)" }
+            } else { Log "  Không thấy thư mục Android trên sdcard — bỏ qua." }
+        } catch { Log "  Bỏ qua sdcard: $(Err-Text $_.Exception)" }
     }
     return $pick
 }
@@ -512,6 +719,7 @@ function Rescue-Game($src) {
     if (-not (HasConsole)) { Log "Không thấy ldconsole.exe trong thư mục LDPlayer."; return }
 
     $work = Get-WorkDir
+    $script:Readers = @()
     try {
         Stop-LD
         $pick = $null
@@ -526,6 +734,8 @@ function Rescue-Game($src) {
         if (-not $pick) { Log "Không lấy được game từ tab [$src]. Gửi ảnh log này để được hỗ trợ."; return }
         Restore-ToCleanTab $src $pick $work
     } finally {
+        foreach ($r in $script:Readers) { try { $r.Dispose() } catch {} }
+        $script:Readers = @()
         Log "Dọn file tạm..."
         Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -533,7 +743,7 @@ function Rescue-Game($src) {
 
 # ================= Giao diện =================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "LDFix v3.1 — Gỡ lỗi tab LDPlayer 4"
+$form.Text = "LDFix v3.2 — Gỡ lỗi tab LDPlayer 4"
 $form.Size = New-Object System.Drawing.Size(680, 610)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
