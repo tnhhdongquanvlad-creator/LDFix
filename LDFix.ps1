@@ -1,4 +1,4 @@
-﻿# LDFix v3.3 - Gỡ lỗi / cứu game từ tab LDPlayer 4
+﻿# LDFix v3.4 - Gỡ lỗi / cứu game từ tab LDPlayer 4
 # Cách làm: tạo tab mới, chép data.vmdk + sdcard.vmdk từ tab lỗi sang tab mới.
 # Tab cũ KHÔNG bị xoá và được sao lưu trước khi làm.
 
@@ -244,7 +244,14 @@ function Connect-Adb($idx, [bool]$needBoot, [int]$minutes) {
     if (-not $script:AdbRestarted) {
         Get-Process | Where-Object { $_.Name -eq 'adb' } | ForEach-Object { try { $_.Kill() } catch {} }
         # Khởi động adb server KHÔNG chuyển hướng output, để server không giữ file tạm
-        try { Start-Process -FilePath $script:Adb -ArgumentList 'start-server' -WindowStyle Hidden -Wait } catch {}
+        # (KHÔNG dùng Start-Process -Wait: nó đợi cả adb server chạy nền => treo mãi)
+        try {
+            $psi = New-Object Diagnostics.ProcessStartInfo($script:Adb, 'start-server')
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $sp = [Diagnostics.Process]::Start($psi)
+            $end = (Get-Date).AddSeconds(30)
+            while (-not $sp.HasExited -and (Get-Date) -lt $end) { Start-Sleep -Milliseconds 200; [System.Windows.Forms.Application]::DoEvents() }
+        } catch {}
         $script:AdbRestarted = $true
     }
     $emu = "emulator-{0}" -f (5554 + 2 * $idx)
@@ -752,7 +759,7 @@ function Rescue-Game($src) {
 
 # ================= Giao diện =================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "LDFix v3.3 — Gỡ lỗi tab LDPlayer 4"
+$form.Text = "LDFix v3.4 — Gỡ lỗi tab LDPlayer 4"
 $form.Size = New-Object System.Drawing.Size(680, 610)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
