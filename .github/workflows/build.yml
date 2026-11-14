@@ -14,23 +14,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build exe with ps2exe
+      - name: Build
         shell: powershell
-        run: |
-          Install-Module ps2exe -Scope CurrentUser -Force
-          Invoke-ps2exe -inputFile .\LDFix.ps1 -outputFile .\LDFix.exe `
-            -noConsole -requireAdmin -STA `
-            -title "LDFix" -description "Go loi tab LDPlayer 4" -version "1.0.0"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: LDFix
-          path: LDFix.exe
+        run: .\build.ps1
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: LDFix v1.0.${{ github.run_number }}
+          tag_name: v2.0.${{ github.run_number }}
+          name: LDFix v2.0.${{ github.run_number }}
           make_latest: true
-          files: LDFix.exe
+          files: |
+            LDFix.zip
+            LDFix.exe
