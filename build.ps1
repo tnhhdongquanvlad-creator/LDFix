@@ -2,7 +2,7 @@
 $ErrorActionPreference = "Stop"
 Install-Module ps2exe -Scope CurrentUser -Force
 Invoke-ps2exe -inputFile .\LDFix.ps1 -outputFile .\LDFix.exe -noConsole -requireAdmin -STA `
-    -title "LDFix" -description "Go loi / cuu game tab LDPlayer 4" -version "3.0.0"
+    -title "LDFix" -description "Go loi / cuu game tab LDPlayer 4" -version "3.1.0"
 
 $seven = "$env:ProgramFiles\7-Zip"
 if (-not (Test-Path "$seven\7z.exe")) { choco install 7zip -y --no-progress }

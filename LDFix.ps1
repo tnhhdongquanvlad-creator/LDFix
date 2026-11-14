@@ -1,4 +1,4 @@
-﻿# LDFix v3 - Gỡ lỗi / cứu game từ tab LDPlayer 4
+﻿# LDFix v3.1 - Gỡ lỗi / cứu game từ tab LDPlayer 4
 # Cách làm: tạo tab mới, chép data.vmdk + sdcard.vmdk từ tab lỗi sang tab mới.
 # Tab cũ KHÔNG bị xoá và được sao lưu trước khi làm.
 
@@ -233,6 +233,11 @@ function Run-RootScript([string[]]$lines, [string]$work, [int]$t = 1800) {
 
 # Kết nối ADB tới tab $idx. $needBoot = phải đợi Android khởi động xong
 function Connect-Adb($idx, [bool]$needBoot, [int]$minutes) {
+    if (-not $script:AdbRestarted) {
+        Get-Process | Where-Object { $_.Name -eq 'adb' } | ForEach-Object { try { $_.Kill() } catch {} }
+        [void](Run-Exe $script:Adb @('start-server') 60)
+        $script:AdbRestarted = $true
+    }
     $emu = "emulator-{0}" -f (5554 + 2 * $idx)
     $tcp = "127.0.0.1:{0}" -f (5555 + 2 * $idx)
     $end = (Get-Date).AddMinutes($minutes)
@@ -247,6 +252,11 @@ function Connect-Adb($idx, [bool]$needBoot, [int]$minutes) {
         if (-not $needBoot) { return $true }
         if ((Adb @('shell', 'getprop sys.boot_completed') 20).Out.Trim() -eq '1') { Wait-Sec 10; return $true }
     }
+    $dev = Run-Exe $script:Adb @('devices', '-l') 30
+    Log ("  [chẩn đoán] adb devices: " + ((($dev.Out + $dev.Err) -split "`r?`n" | Where-Object { $_ -match '\S' }) -join ' | '))
+    $lst = (& (LdConsole) list2 2>$null) | Where-Object { $_ -match "^$idx," }
+    Log "  [chẩn đoán] ldconsole list2: $lst"
+    Log "  [chẩn đoán] đã thử: $emu và $tcp"
     return $false
 }
 
@@ -347,8 +357,10 @@ function Extract-ViaAdb($src, $work) {
 }
 
 # ---------- Cách 2: đọc bên trong data.vmdk bằng 7-Zip ----------
-function Get-7zEntries($img) {
-    $r = Run-Exe $script:SevenZ @('l', '-slt', $img)
+function Get-7zEntries($img, [string]$type = '') {
+    $a = @('l', '-slt', $img); if ($type) { $a += "-t$type" }
+    $r = Run-Exe $script:SevenZ $a
+    $script:Last7z = $r
     $list = New-Object System.Collections.Generic.List[object]
     $cur = $null; $started = $false
     foreach ($line in ($r.Out -split "`r?`n")) {
@@ -369,8 +381,16 @@ function Open-Disk($vmdk, $work) {
     $img = $vmdk
     for ($lvl = 0; $lvl -lt 3; $lvl++) {
         $entries = Get-7zEntries $img
+        if ($entries.Count -le 20 -and $lvl -gt 0) {
+            $e2 = Get-7zEntries $img 'Ext'
+            if ($e2.Count -gt $entries.Count) { $entries = $e2 }
+        }
         if ($entries.Count -gt 20) { return [pscustomobject]@{ Img = $img; Entries = $entries } }
-        if ($entries.Count -eq 0) { throw "7-Zip không đọc được $img" }
+        if ($entries.Count -eq 0) {
+            $msg = (($script:Last7z.Err + "`n" + $script:Last7z.Out) -split "`r?`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 4) -join ' | '
+            throw "7-Zip không đọc được $img — chi tiết: $msg"
+        }
+        Log ("  Trong {0} có: {1}" -f (Split-Path $img -Leaf), (($entries | ForEach-Object { "{0} ({1:N1} GB)" -f $_.Path, ($_.Size / 1GB) }) -join ', '))
         $inner = $entries | Where-Object { -not $_.IsDir } | Sort-Object Size -Descending | Select-Object -First 1
         $free = Get-FreeBytes $work
         if ($inner.Size -gt ($free - 2GB)) {
@@ -378,9 +398,16 @@ function Open-Disk($vmdk, $work) {
         }
         Log ("Đang bung ổ ảo '{0}' ({1:N1} GB), có thể mất 10-30 phút..." -f $inner.Path, ($inner.Size / 1GB))
         $dir = Join-Path $work "lvl$lvl"
-        [void](Run-Exe $script:SevenZ @('x', $img, "-o$dir", '-y', $inner.Path) 7200)
+        $t0 = Get-Date
+        $r = Run-Exe $script:SevenZ @('x', $img, "-o$dir", '-y', $inner.Path) 7200
         $img = Join-Path $dir $inner.Path
-        if (-not (Test-Path $img)) { throw "Không bung được $($inner.Path)" }
+        $got = if (Test-Path $img) { (Get-Item $img).Length } else { 0 }
+        Log ("  7-Zip xong sau {0:N0} giây, mã {1}, file thật {2:N1} GB" -f ((Get-Date) - $t0).TotalSeconds, $r.Code, ($got / 1GB))
+        if ($r.Code -ne 0) {
+            $msg = (($r.Err + "`n" + $r.Out) -split "`r?`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 4) -join ' | '
+            Log "  Lỗi 7-Zip: $msg"
+        }
+        if ($got -eq 0) { throw "Không bung được $($inner.Path)" }
     }
     throw "Không tìm thấy hệ thống file trong $vmdk"
 }
@@ -506,7 +533,7 @@ function Rescue-Game($src) {
 
 # ================= Giao diện =================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "LDFix v3 — Gỡ lỗi tab LDPlayer 4"
+$form.Text = "LDFix v3.1 — Gỡ lỗi tab LDPlayer 4"
 $form.Size = New-Object System.Drawing.Size(680, 610)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
